@@ -12,6 +12,11 @@ export interface RedisQueueWireMessage {
 
 export type HandleMessageAckCall = () => Promise<void>;
 
+export interface Room {
+  handleMessage: HandleMessageCall;
+  sync: boolean;
+};
+
 export interface HandleMessageCallArguments {
   data: any,
   ack: HandleMessageAckCall | null,
@@ -58,7 +63,7 @@ export class RedisQueueClient extends EventEmitter<Events> {
 
   private redisScriptsPrepared: boolean = false;
 
-  private rooms: Record<string, HandleMessageCall> = {};
+  private rooms: Record<string, Room> = {};
 
   private housekeepingIntervalHandle: NodeJS.Timer;
 
@@ -133,8 +138,9 @@ export class RedisQueueClient extends EventEmitter<Events> {
 
     await this.redis_subscriber_message.subscribe(this.keyRoomPubsub(room));
 
+    await this._subscribe(room, handleMessage, sync);
+
     if (sync) {
-      await this._subscribe(room, handleMessage);
       await this._pong();
     }
   }
@@ -257,9 +263,7 @@ export class RedisQueueClient extends EventEmitter<Events> {
     if (parts[parts.length - 1] === 'msg-pubsub') {
       const room = parts[parts.length - 2];
 
-      if (room in this.rooms) {
-        await this._handleMessage(room, message);
-      }
+      await this._handleMessage(room, message);
     }
 }
 
@@ -295,28 +299,32 @@ export class RedisQueueClient extends EventEmitter<Events> {
     this.redisScriptsPrepared = true;
   }
 
-  private async _subscribe (room: string, handleMessage: HandleMessageCall): Promise<void> {
+  private async _subscribe (room: string, handleMessage: HandleMessageCall, sync: boolean): Promise<void> {
     room = room.toLowerCase();
 
     if (room in this.rooms) throw new Error(`Already subscribed to room '${room}'`);
 
-    const result = await this.callAddSyncClientToRoom(
-      [ this.clientId, room, Date.now() ],
-      [ this.keyGlobalSetOfKnownClients, this.keyRoomSetOfKnownClients(room), this.keyRoomSetOfAckedClients(room) ]
-    );
+    if (sync) {
+      const result = await this.callAddSyncClientToRoom(
+        [ this.clientId, room, Date.now() ],
+        [ this.keyGlobalSetOfKnownClients, this.keyRoomSetOfKnownClients(room), this.keyRoomSetOfAckedClients(room) ]
+      );
 
-    if (result) throw new Error(result);
+      if (result) throw new Error(result);
+    }
 
-    this.rooms[room] = handleMessage;
+    this.rooms[room] = { handleMessage, sync };
   }
 
   private async _unsubscribe (room: string): Promise<void> {
     room = room.toLowerCase();
 
-    await this.callRemoveSyncClientFromRoom(
-      [ this.clientId, room, Date.now() ],
-      [ this.keyGlobalSetOfKnownClients, this.keyRoomSetOfKnownClients(room), this.keyRoomSetOfAckedClients(room), this.keyPubsubAdminEventsRemoveClientTopic ]
-    );
+    if (this.rooms[room].sync) {
+      await this.callRemoveSyncClientFromRoom(
+        [ this.clientId, room, Date.now() ],
+        [ this.keyGlobalSetOfKnownClients, this.keyRoomSetOfKnownClients(room), this.keyRoomSetOfAckedClients(room), this.keyPubsubAdminEventsRemoveClientTopic ]
+      );
+    }
     
     delete this.rooms[room];
   }
@@ -365,14 +373,9 @@ export class RedisQueueClient extends EventEmitter<Events> {
   }
 
   private async _handleMessage(room: string, message: string): Promise<void> {
-    if (!(room in this.rooms)) {
-      console.warn(`Received message for room '${room}' without any subscribers.`);
-      return;
-    }
-
     const wireMessage = JSON.parse(message) as RedisQueueWireMessage;
 
-    const ack = !!wireMessage.s ? async (): Promise<void> => {
+    const ack = (this.rooms[room].sync && !!wireMessage.s) ? async (): Promise<void> => {
       const ackToken = `${wireMessage.c}::${room}`;
 
       await this.ack(ackToken);
@@ -387,7 +390,7 @@ export class RedisQueueClient extends EventEmitter<Events> {
       }
     }
 
-    this.rooms[room](args);
+    this.rooms[room].handleMessage(args);
   }
 
   private async _send({ data, priority = 1, room }: { data: any, priority: number, room: string }): Promise<number> {
