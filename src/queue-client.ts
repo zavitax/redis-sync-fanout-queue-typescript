@@ -1,7 +1,6 @@
 import Redis from 'ioredis';
 import { RedisScriptCall, prepare_redis_script, redis_call, clone_redis_connection } from './redis-utils';
 import * as scripts from './lua-scripts';
-import { EventEmitter } from 'eventemitter3';
 
 export interface RedisQueueWireMessage {
   t: number;
@@ -12,11 +11,6 @@ export interface RedisQueueWireMessage {
 
 export type HandleMessageAckCall = () => Promise<void>;
 
-export interface Room {
-  handleMessage: HandleMessageCall;
-  sync: boolean;
-};
-
 export interface HandleMessageCallArguments {
   data: any,
   ack: HandleMessageAckCall | null,
@@ -26,24 +20,30 @@ export interface HandleMessageCallArguments {
   }
 }
 
-export interface Events {
-  timeout(): void;
-};
-
-export type HandleMessageCall = ({ data, context }: HandleMessageCallArguments) => Promise<void>;
+// export type ClientNoticeCall = ({ clientId, room }: { clientId: string, room: string }) => void;
+export type RoomNoticeCall = ({ room }: { room: string }) => void;
+export type HandleMessageCall = ({ data, context }: HandleMessageCallArguments) => void;
 
 export interface ConstructorArgs {
   redis: Redis;
+  sync: boolean;
   clientTimeoutMs: number;
   redisKeyPrefix: string;
+  handleRoomEjected: RoomNoticeCall | null;
 }
 
-export class RedisQueueClient extends EventEmitter<Events> {
+interface Room {
+  handleMessage: HandleMessageCall;
+};
+
+export class RedisQueueClient {
   private redis: Redis;
   private redis_subscriber_timeout: Redis;
   private redis_subscriber_message: Redis;
   private clientTimeoutMs: number;
   private redisKeyPrefix: string;
+
+  private handleRoomEjected: RoomNoticeCall | null = null;
 
   private clientId: string;
   private lastMessageSequenceNumber: number = 0;
@@ -66,6 +66,8 @@ export class RedisQueueClient extends EventEmitter<Events> {
   private rooms: Record<string, Room> = {};
 
   private housekeepingIntervalHandle: NodeJS.Timer;
+
+  private sync: boolean = true;
 
   private _handleMessageStats (wireMessage: RedisQueueWireMessage): void {
     const now = Date.now();
@@ -107,13 +109,16 @@ export class RedisQueueClient extends EventEmitter<Events> {
   constructor ({
     redis,
     clientTimeoutMs = 30000,
+    sync = true,
     redisKeyPrefix = '{redis-ordered-queue}',
+    handleRoomEjected = null,
   }: ConstructorArgs) {
-    super();
-
     this.redis = redis;
     this.clientTimeoutMs = clientTimeoutMs;
+    this.sync = sync;
     this.redisKeyPrefix = redisKeyPrefix;
+
+    this.handleRoomEjected = handleRoomEjected;
 
     this.keyClientIDSequence = `${redisKeyPrefix}::global::last-client-id-seq`;
     this.keyLastTimestamp = `${redisKeyPrefix}::global::last-client-id-timestamp`;
@@ -127,8 +132,7 @@ export class RedisQueueClient extends EventEmitter<Events> {
   async subscribe ({
     room,
     handleMessage,
-    sync = true
-  }: { room: string, handleMessage: HandleMessageCall, sync: boolean }) {   
+  }: { room: string, handleMessage: HandleMessageCall }) {   
     room = room.toLowerCase();
 
     await this._initRedis();
@@ -138,9 +142,9 @@ export class RedisQueueClient extends EventEmitter<Events> {
 
     await this.redis_subscriber_message.subscribe(this.keyRoomPubsub(room));
 
-    await this._subscribe(room, handleMessage, sync);
+    await this._subscribe(room, handleMessage);
 
-    if (sync) {
+    if (this.sync) {
       await this._pong();
     }
   }
@@ -242,22 +246,23 @@ export class RedisQueueClient extends EventEmitter<Events> {
     );
   }
 
-  private _handleTimeoutMessage (...args: any[]): void {
-    console.log('_handleTimeoutMessage: ', ...args);
-
-    /*
+  private _handleTimeoutMessage (_channel: string, message: string): void {
     const [ clientId, _ ] = message.split('::', 2);
 
     if (clientId === this.clientId) {
-      this.rooms = {};
+      if (this.handleRoomEjected) {
+        for (const room of Object.keys(this.rooms)) {
+          this.redis_subscriber_message.unsubscribe(this.keyRoomPubsub(room));
+          
+          this.handleRoomEjected({ room });
+        }
+      }
 
-      this.emit('timeout');
-    }*/
+      this.rooms = {};
+    }
   }
 
   private async _handleRoomMessage(channel: string, message: string): Promise<void> {
-    console.log('_handleRoomMessage: ', channel, message);
-
     const parts = channel.split('::');
 
     if (parts[parts.length - 1] === 'msg-pubsub') {
@@ -299,12 +304,12 @@ export class RedisQueueClient extends EventEmitter<Events> {
     this.redisScriptsPrepared = true;
   }
 
-  private async _subscribe (room: string, handleMessage: HandleMessageCall, sync: boolean): Promise<void> {
+  private async _subscribe (room: string, handleMessage: HandleMessageCall): Promise<void> {
     room = room.toLowerCase();
 
     if (room in this.rooms) throw new Error(`Already subscribed to room '${room}'`);
 
-    if (sync) {
+    if (this.sync) {
       const result = await this.callAddSyncClientToRoom(
         [ this.clientId, room, Date.now() ],
         [ this.keyGlobalSetOfKnownClients, this.keyRoomSetOfKnownClients(room), this.keyRoomSetOfAckedClients(room) ]
@@ -313,13 +318,13 @@ export class RedisQueueClient extends EventEmitter<Events> {
       if (result) throw new Error(result);
     }
 
-    this.rooms[room] = { handleMessage, sync };
+    this.rooms[room] = { handleMessage };
   }
 
   private async _unsubscribe (room: string): Promise<void> {
     room = room.toLowerCase();
 
-    if (this.rooms[room].sync) {
+    if (this.sync) {
       await this.callRemoveSyncClientFromRoom(
         [ this.clientId, room, Date.now() ],
         [ this.keyGlobalSetOfKnownClients, this.keyRoomSetOfKnownClients(room), this.keyRoomSetOfAckedClients(room), this.keyPubsubAdminEventsRemoveClientTopic ]
@@ -373,9 +378,11 @@ export class RedisQueueClient extends EventEmitter<Events> {
   }
 
   private async _handleMessage(room: string, message: string): Promise<void> {
+    if (!this.rooms[room]) return;
+
     const wireMessage = JSON.parse(message) as RedisQueueWireMessage;
 
-    const ack = (this.rooms[room].sync && !!wireMessage.s) ? async (): Promise<void> => {
+    const ack = (this.sync && !!wireMessage.s) ? async (): Promise<void> => {
       const ackToken = `${wireMessage.c}::${room}`;
 
       await this.ack(ackToken);

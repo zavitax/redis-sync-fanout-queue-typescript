@@ -28,7 +28,7 @@ async function main() {
 
   await client.subscribe({
     room: 'room1',
-    handleMessage: async ({ data, ack }) => {
+    handleMessage: ({ data, ack }) => {
       console.log('Message: ', 'room1', ': ', ack, ' -> ', data);
 
       if (!!ack) {
@@ -40,7 +40,7 @@ async function main() {
   });
 
   setInterval(() => {
-    client.pong();
+    // client.pong();
   }, 3000);
 }
 

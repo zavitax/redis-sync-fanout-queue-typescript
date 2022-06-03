@@ -19,6 +19,7 @@ async function main() {
   const client = new RedisQueueClient({
     redis: redis,
     clientTimeoutMs: 10000,
+    sync: true,
     redisKeyPrefix: `redis-sync-fanout-queue`
   });
 

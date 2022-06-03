@@ -21,7 +21,11 @@ async function main() {
   const client = new RedisQueueClient({
     redis: redis,
     clientTimeoutMs: 10000,
-    redisKeyPrefix: `redis-sync-fanout-queue`
+    sync: true,
+    redisKeyPrefix: `redis-sync-fanout-queue`,
+    handleRoomEjected: ({ room }) => {
+      console.log('Ejected from room: ', room);
+    },
   });
 
   console.log('send');
