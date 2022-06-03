@@ -204,6 +204,7 @@ export class RedisQueueClient {
   private async _housekeep (): Promise<void> {
     await this._initRedis();
 
+    await this._pong();
     await this._removeTimedOutClients();
     await this._conditionalProcessRoomsMessages();
   }
@@ -222,6 +223,12 @@ export class RedisQueueClient {
 
   private async _lock (tag: string, timeoutMs: number = 30000): Promise<boolean> {
     const result = await redis_call(this.redis, 'SET', this.keyGlobalLock(tag), this.clientId, 'NX', 'PX', timeoutMs);
+
+    return !!result;
+  }
+
+  private async _extend_lock (tag: string, timeoutMs: number = 30000): Promise<boolean> {
+    const result = await redis_call(this.redis, 'PEXPIRE', this.keyGlobalLock(tag), timeoutMs);
 
     return !!result;
   }
@@ -344,7 +351,10 @@ export class RedisQueueClient {
   }
 
   private async _removeTimedOutClients (): Promise<void> {
-    if (!await this._lock('_removeTimedOutClients', 30000)) return;
+    const lockKey = '_removeTimedOutClients';
+    const lockTimeoutMs = Math.ceil(this.clientTimeoutMs / 2);
+
+    if (!await this._lock(lockKey, lockTimeoutMs)) return;
 
     const argMaxTimestampToRemove = Date.now() - this.clientTimeoutMs;
 
@@ -357,16 +367,23 @@ export class RedisQueueClient {
         [ clientId, room, Date.now() ],
         [ this.keyGlobalSetOfKnownClients, this.keyRoomSetOfKnownClients(room), this.keyRoomSetOfAckedClients(room), this.keyPubsubAdminEventsRemoveClientTopic ]
       )
+
+      await this._extend_lock(lockKey, lockTimeoutMs);
     }
   }
 
   private async _conditionalProcessRoomsMessages (): Promise<void> {
-    if (!await this._lock('_conditionalProcessRoomsMessages', 5000)) return;
+    const lockKey = '_conditionalProcessRoomsMessages';
+    const lockTimeoutMs = Math.ceil(this.clientTimeoutMs / 2);
+
+    if (!await this._lock(lockKey, lockTimeoutMs)) return;
 
     const roomIDs = await redis_call(this.redis, 'ZRANGEBYSCORE', this.keyGlobalKnownRooms, "-inf", "+inf");
 
     for (const room of roomIDs) {
       await this._conditionalProcessRoomMessages(room);
+
+      await this._extend_lock(lockKey, lockTimeoutMs);
     }
   }
 

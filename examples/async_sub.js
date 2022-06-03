@@ -37,7 +37,7 @@ async function main() {
   });
 
   setInterval(() => {
-    client.pong();
+    //client.pong();
   }, 3000);
 }
 

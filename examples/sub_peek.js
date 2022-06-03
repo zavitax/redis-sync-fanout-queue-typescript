@@ -40,7 +40,7 @@ async function main() {
   });
 
   setInterval(async () => {
-    await client.pong();
+    // await client.pong();
     const msgs = await client.peek({ room: 'room1', limit: 10 });
     console.log(msgs);
   }, 3000);
