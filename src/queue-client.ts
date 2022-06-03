@@ -234,7 +234,7 @@ export class RedisQueueClient {
   private async _peek (room: string, offset: number, limit: number): Promise<string[]> {
     room = room.toLowerCase();
 
-    return await redis_call(this.redis, 'ZRANGEBYSCORE', this.keyRoomQueue(room), "-inf", "+inf", 'LIMIT', 0, offset, limit);
+    return await redis_call(this.redis, 'ZRANGEBYSCORE', this.keyRoomQueue(room), "-inf", "+inf", 'LIMIT', offset, limit);
   }
 
   private async _ack ({ room }: { room: string }): Promise<void> {
