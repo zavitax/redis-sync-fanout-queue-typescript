@@ -257,10 +257,10 @@ export class RedisQueueClient {
     const [ clientId, _ ] = message.split('::', 2);
 
     if (clientId === this.clientId) {
-      if (this.handleRoomEjected) {
-        for (const room of Object.keys(this.rooms)) {
-          this.redis_subscriber_message.unsubscribe(this.keyRoomPubsub(room));
-          
+      for (const room of Object.keys(this.rooms)) {
+        this.redis_subscriber_message.unsubscribe(this.keyRoomPubsub(room));
+        
+        if (this.handleRoomEjected) {
           this.handleRoomEjected({ room });
         }
       }
@@ -277,7 +277,7 @@ export class RedisQueueClient {
 
       await this._handleMessage(room, message);
     }
-}
+  }
 
   private async _initRedis (): Promise<void> {
     if (this.redisScriptsPrepared) return;
